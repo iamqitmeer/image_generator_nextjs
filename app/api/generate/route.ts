@@ -22,7 +22,10 @@ const aspectRatioMap: { [key: string]: { width: number, height: number } } = {
 export async function POST(req: Request) {
   try {
     if (!process.env.REPLICATE_API_TOKEN) {
-      throw new Error("REPLICATE_API_TOKEN environment variable not set.");
+      return new NextResponse(
+        "Missing REPLICATE_API_TOKEN. Please check your .env.local file and restart the server.",
+        { status: 500 }
+      );
     }
 
     const body = await req.json();
@@ -39,12 +42,12 @@ export async function POST(req: Request) {
     } = body;
 
     if (!prompt) {
-      return new NextResponse("Prompt is required", { status: 400 });
+      return new NextResponse("Prompt is required.", { status: 400 });
     }
 
     const selectedModel = modelDetails[model as keyof typeof modelDetails];
     if (!selectedModel) {
-        return new NextResponse("Invalid model selected", { status: 400 });
+        return new NextResponse("Invalid model selected.", { status: 400 });
     }
 
     const dimensions = aspectRatioMap[aspectRatio as keyof typeof aspectRatioMap] || { width: 1024, height: 1024 };
@@ -59,9 +62,9 @@ export async function POST(req: Request) {
         height: dimensions.height,
     };
 
-    if (uploadedImageUrl) {
+    if (uploadedImageUrl && imageStrength) {
         apiInput.image = uploadedImageUrl;
-        apiInput.prompt_strength = 1.0 - imageStrength;
+        apiInput.image_guidance_scale = imageStrength;
     }
 
     console.log("Running Replicate with input:", apiInput);
@@ -84,7 +87,7 @@ export async function POST(req: Request) {
 
     const imageResponse = await fetch(imageUrl);
     if (!imageResponse.ok) {
-        throw new Error(`Failed to fetch the generated image. Status: ${imageResponse.status}`);
+        throw new Error(`Failed to fetch the generated image from URL. Status: ${imageResponse.status}`);
     }
     
     const imageBlob = await imageResponse.blob();
@@ -95,7 +98,20 @@ export async function POST(req: Request) {
 
   } catch (error: any) {
     console.error("[GENERATION_ERROR]", error);
-    const errorMessage = error.message || "An unknown internal server error occurred.";
+
+    let errorMessage = "An unknown error occurred during generation.";
+    if (error.message) {
+        if (error.message.includes('authentication')) {
+            errorMessage = "Authentication failed. Please check your REPLICATE_API_TOKEN in the .env.local file and restart your server.";
+        } else if (error.message.includes('billing')) {
+            errorMessage = "Billing issue detected. You may have run out of Replicate credits. Please check your account dashboard.";
+        } else if (error.message.includes('prediction failed')) {
+            errorMessage = "The model failed to run. This might be a temporary Replicate issue. Please try again later.";
+        } else {
+            errorMessage = error.message;
+        }
+    }
+    
     return new NextResponse(errorMessage, { status: 500, statusText: errorMessage });
   }
 }
