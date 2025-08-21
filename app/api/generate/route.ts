@@ -1,90 +1,95 @@
 import { NextResponse } from "next/server";
+import Replicate from "replicate";
 
-const MAX_RETRIES = 3;
-const RETRY_DELAY = 1500;
+const replicate = new Replicate({
+  auth: process.env.REPLICATE_API_TOKEN,
+});
 
-async function fetchWithRetry(url: string, options: RequestInit, retries: number = MAX_RETRIES): Promise<Response> {
-    try {
-        const response = await fetch(url, options);
-        if (!response.ok && retries > 0) {
-            console.warn(`API request failed with status ${response.status}. Retrying... (${retries - 1} left)`);
-            await new Promise(res => setTimeout(res, RETRY_DELAY));
-            return fetchWithRetry(url, options, retries - 1);
-        }
-        return response;
-    } catch (error) {
-        if (retries > 0) {
-            console.warn(`API request threw an error. Retrying... (${retries - 1} left)`, error);
-            await new Promise(res => setTimeout(res, RETRY_DELAY));
-            return fetchWithRetry(url, options, retries - 1);
-        }
-        throw error;
-    }
-}
+const modelDetails: { [key: string]: { id: string } } = {
+    "stable-diffusion-xl": { id: "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b" },
+    "photorealistic": { id: "lucataco/photorealistic-fuen-v1:517f51b64653b68334467389441113b2e0430154cf5e296e8648ba745c2698e6" },
+    "anime": { id: "lucataco/anime-fuen-v1:30a73c9b4c73f78e02554792a6c3f25b304c005b630e527f316223b209d7010f" },
+};
+
+const aspectRatioMap: { [key: string]: { width: number, height: number } } = {
+    "1:1": { width: 1024, height: 1024 },
+    "16:9": { width: 1344, height: 768 },
+    "9:16": { width: 768, height: 1344 },
+    "4:3": { width: 1152, height: 896 },
+    "3:4": { width: 896, height: 1152 },
+};
 
 export async function POST(req: Request) {
   try {
-    const { prompt, negativePrompt, style, aspectRatio, seed, cfgScale, steps } = await req.json();
+    if (!process.env.REPLICATE_API_TOKEN) {
+      throw new Error("REPLICATE_API_TOKEN environment variable not set.");
+    }
 
-    if (!prompt) return new NextResponse("Prompt is required", { status: 400 });
-    if (!style) return new NextResponse("Style is required", { status: 400 });
-    if (!aspectRatio) return new NextResponse("Aspect ratio is required", { status: 400 });
+    const body = await req.json();
+    const { 
+        prompt, 
+        negativePrompt, 
+        model, 
+        aspectRatio, 
+        seed, 
+        cfgScale, 
+        steps,
+        uploadedImageUrl,
+        imageStrength
+    } = body;
 
-    const styleMap: { [key: string]: string } = {
-        Hyperrealistic: ", 8k, photorealistic, cinematic lighting, ultra-detailed, professional photography",
-        Anime: ", anime style, key visual, vibrant colors, digital art, by makoto shinkai",
-        "Digital Painting": ", digital painting, concept art, smooth, sharp focus, illustration, by artgerm",
-        Cinematic: ", cinematic still, movie poster, dramatic lighting, epic, emotional",
-        "Retro Futurism": ", retro futurism, 1980s style, synthwave, vintage sci-fi poster, grainy",
-        "Low Poly": ", low poly, 3d render, isometric, vibrant colors, simple shapes",
-        "Comic Book": ", comic book art, graphic novel style, bold lines, cel shading, by jim lee",
-        "Dark Fantasy": ", dark fantasy art, intricate detail, epic scale, magical, ominous, by greg rutkowski",
-        Cyberpunk: ", cyberpunk, neon lights, futuristic city, blade runner aesthetic, dystopian"
+    if (!prompt) {
+      return new NextResponse("Prompt is required", { status: 400 });
+    }
+
+    const selectedModel = modelDetails[model as keyof typeof modelDetails];
+    if (!selectedModel) {
+        return new NextResponse("Invalid model selected", { status: 400 });
+    }
+
+    const dimensions = aspectRatioMap[aspectRatio as keyof typeof aspectRatioMap] || { width: 1024, height: 1024 };
+
+    const apiInput: { [key: string]: any } = {
+        prompt: prompt,
+        negative_prompt: negativePrompt,
+        seed: seed,
+        guidance_scale: cfgScale,
+        num_inference_steps: steps,
+        width: dimensions.width,
+        height: dimensions.height,
     };
 
-    const aspectRatioMap: { [key: string]: string } = {
-        "1:1": "&width=1024&height=1024",
-        "16:9": "&width=1536&height=864",
-        "9:16": "&width=864&height=1536",
-        "4:3": "&width=1024&height=768",
-        "3:4": "&width=768&height=1024"
-    };
-    
-    let fullPrompt = `${prompt}${styleMap[style] || ""}`;
-    if (negativePrompt) {
-        fullPrompt += `, (worst quality, low quality, normal quality, blurry, deformed, ugly), ${negativePrompt}`;
+    if (uploadedImageUrl) {
+        apiInput.image = uploadedImageUrl;
+        apiInput.prompt_strength = 1.0 - imageStrength;
     }
 
-    const params = new URLSearchParams();
-    params.append("width", (aspectRatioMap[aspectRatio] || "&width=1024&height=1024").split('&')[1].split('=')[1]);
-    params.append("height", (aspectRatioMap[aspectRatio] || "&width=1024&height=1024").split('&')[2].split('=')[1]);
-    params.append("seed", String(seed || Math.floor(Math.random() * 10000000)));
-    params.append("cfg", String(cfgScale || 7.5));
-    params.append("steps", String(steps || 25));
-    params.append("nologo", "true");
+    console.log("Running Replicate with input:", apiInput);
 
-    const encodedPrompt = encodeURIComponent(fullPrompt);
-    const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?${params.toString()}`;
-
-    console.log(`Fetching from: ${imageUrl}`);
+    const output = await replicate.run(
+      selectedModel.id as `${string}/${string}:${string}`,
+      {
+        input: apiInput,
+      }
+    );
     
-    const response = await fetchWithRetry(imageUrl, { headers: { 'Accept': 'image/png' } });
-
-    if (!response.ok || !response.body) {
-      const errorBody = await response.text();
-      console.error(`Pollinations API Error (${response.status}): ${errorBody}`);
-      throw new Error(`The image generation service failed after multiple attempts. It may be temporarily down. Please try again later.`);
+    if (!output || !Array.isArray(output) || output.length === 0) {
+        throw new Error("Failed to get a valid response from the generation API.");
     }
 
-    const imageBlob = await response.blob();
-    
-    if(!imageBlob.type.startsWith('image/')) {
-        console.error("Pollinations API did not return an image. It may be down or the prompt was rejected.", imageBlob);
-        throw new Error("The image generation service returned an invalid response. Please try a different prompt or check the service status.");
+    const imageUrl = output[0];
+    if (typeof imageUrl !== 'string') {
+        throw new Error("API returned an invalid image URL format.");
     }
 
+    const imageResponse = await fetch(imageUrl);
+    if (!imageResponse.ok) {
+        throw new Error(`Failed to fetch the generated image. Status: ${imageResponse.status}`);
+    }
+    
+    const imageBlob = await imageResponse.blob();
     const headers = new Headers();
-    headers.set("Content-Type", imageBlob.type);
+    headers.set("Content-Type", imageResponse.headers.get("Content-Type") || "image/png");
 
     return new NextResponse(imageBlob, { status: 200, statusText: "OK", headers });
 
